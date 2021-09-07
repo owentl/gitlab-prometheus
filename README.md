@@ -7,7 +7,7 @@ Generate prometheus metrics from gitlab issues
 ## Configruation
 
 I use a project that contains a JSON for the for the configuration variables of this project.  The script will pull the latest config for usage from GitLab.  This
-is done as there are others that use my script(s) where I work and this makes it easier for them to go in and set those vars instead of having to adjust the container/scripts.
+is done as there are others that use my script(s) where I work and this makes it easier for them to go in and set those vars instead of having to adjust the container/scripts.  If you want to avoid this process you can certainly bring the config into the file as well. 
 
 You will want to setup a config.json in a project and define that project ID in the retro.py file.
 
