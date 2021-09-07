@@ -1,0 +1,4 @@
+python-gitlab==2.6.0
+requests-toolbelt==0.9.1
+requests==2.25.1
+starlette-exporter==0.10.0
