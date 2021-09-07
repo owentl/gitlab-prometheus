@@ -15,7 +15,6 @@ services:
 
     environment:
       - GL_ACCESS_TOKEN=${GL_ACCESS_TOKEN}
-      - GL_SECRET=${GL_SECRET}
     logging:
       driver: json-file
       options:
