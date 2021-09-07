@@ -1,0 +1,8 @@
+{
+    "retro": {
+        "backend": "Backend",
+        "frontend": "Frontend",
+        "coredev": "Core Dev",
+        "coredev_summary": "Core Dev"
+    }
+}
