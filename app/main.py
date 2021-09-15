@@ -1,95 +1,216 @@
-from fastapi import FastAPI, Header, Response
-from typing import List
-from gitlab.const import GUEST_ACCESS
-from retro import run_retro, run_retro2
-import gitlab
+from logging import Logger
+import logging
+from fastapi import FastAPI
+from retro import run_retro2, get_group_issues, iteration_summarize_status,get_issue_counts,iteration_based_metrics,get_releases
+from titan import titan_wide
 import requests
 import os
 import json
 from starlette_exporter import PrometheusMiddleware, handle_metrics
-from prometheus_client import Counter,Gauge
-from starlette.responses import RedirectResponse
+from prometheus_client import Gauge
+
+logFormatter = '%(asctime)s - %(levelname)s - %(message)s'
+logging.basicConfig(format=logFormatter, level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 app.add_middleware(PrometheusMiddleware)
-app.add_route("/metrics", handle_metrics)
-
-gl = gitlab.Gitlab("https://gitlab.com/",private_token=os.environ.get("GL_ACCESS_TOKEN"))
-gl.auth()
 
 @app.get("/")
 async def read_root():
     return {"Hello": "World"}
 
-@app.get("/retro/coredev/{team}")
-async def retro_team(team, iteration: str = None, metric: str = "all"):
-    message = await run_retro(team,iteration,"single",metric)
-    return json.dumps(message)
-    # return {"item_id": int, "iteration": iteration}
 
-@app.get("/retro/coredev/summary/")
-async def retro_summary(team, iteration: str = None):
-    message = await run_retro(team,iteration,"summary")
-    return json.dumps(message)
+### Gitlab Setup
+project = {
+    "GITLAB_URL":'https://gitlab.com/api/v4/',
+    "GITLAB_PROJECT_ID": "############",
+    "GITLAB_HEADERS": { 
+            "PRIVATE-TOKEN": os.environ.get("GL_ACCESS_TOKEN") 
+    }
+}
+CONFIG_MAP = requests.get(
+    project['GITLAB_URL'] + "projects/{}/repository/files/config.json/raw?ref=master".format(project['GITLAB_PROJECT_ID']),
+    headers=project['GITLAB_HEADERS'],
+    verify=True
+).json()['retro']
+CONFIG_MAP.update(project)
 
-ISSUE_WEIGHT_FRONTEND = Gauge("gitlabkpis_frontend_Issues_by_weight","Issue Counts by Weight",["team","user"])
-ISSUE_WEIGHT_BACKEND = Gauge("gitlabkpis_backend_Issues_by_weight","Issue Counts by Weight",["team","user"])
-ISSUE_STATUS = Gauge("gitlabkpis_Issues_by_status","Issue Counts by Status",["status"])
-TIME_ESTIMATE = Gauge("gitlabkpis_time_estimate","Time Estimated by User",["team","user"])
-TIME_SPENT = Gauge("gitlabkpis_time_spent","Time Spent by User",["team","user"])
-TICKETS_USER = Gauge("gitlabkpis_tickets_by_user","Ticket Count by User",["team","user"])
-ITERATION_ISSUE_COUNT = Counter("gitlabkpis_iteration_issue_count","Number of issues in the iteration",["iteration","team"])
-ITERATION_WEIGHT = Counter("gitlabkpis_iteration_weight","Iteration issues weight",["iteration"])
-ITERATION_LABEL_STATUS = Gauge("gitlabkpis_iteration_label_status","Iteration weight by status",["user"])
-ITERATION_LABEL_WEIGHT = Gauge("gitlabkpis_iteration_label_weight","Iteration weight by label",["iteration","label"])
-ITERATION_TIME_ESTIMATE = Gauge("gitlabkpis_iteration_time_estimate","Time Estimated during Iteration",["iteration"])
-ITERATION_TIME_SPENT = Gauge("gitlabkpis_iteration_time_spent","Time Spent during iteration",["iteration"])
-ITERATION_TIME_ESTIMATE_LABEL = Gauge("gitlabkpis_iteration_time_estimate_by_status","Time Estimated during Iteration by label",["iteration"])
-ITERATION_TIME_SPENT_LABEL = Gauge("gitlabkpis_iteration_time_spent_by_status","Time Spent during iteration by label",["iteration"])
-
-
-def build_metrics():
-    (issue_weights_fe,time_spent_fe,time_estimate_fe,tickets_by_user_fe,issue_status_fe,issue_count_fe,iteration) = run_retro2("frontend","current","single","metrics")
-
-    for user in tickets_by_user_fe:
-        TICKETS_USER.labels("frontend",user).set(tickets_by_user_fe[user])
-        ITERATION_LABEL_STATUS.labels(user).set(tickets_by_user_fe[user])
-    for user in issue_status_fe:
-        ISSUE_STATUS.labels(user).set(issue_status_fe[user])
-    for user in issue_weights_fe:
-        ISSUE_WEIGHT_FRONTEND.labels("frontend",user).set(issue_weights_fe[user])
-    for user in time_estimate_fe:
-        TIME_ESTIMATE.labels("frontend",user).set(time_estimate_fe[user])
-    for user in time_spent_fe:
-        TIME_SPENT.labels("frontend",user).set(time_spent_fe[user])
     
-    (issue_weights_be,time_spent_be,time_estimate_be,tickets_by_user_be,issue_status_be,issue_count_be,iteration) = run_retro2("backend","current","single","metrics")
-    for user in issue_status_be:
-        ISSUE_STATUS.labels(user).inc(issue_status_be[user])
-    for user in issue_weights_be:
-        ISSUE_WEIGHT_BACKEND.labels("backend",user).inc(issue_weights_be[user])
-    for user in time_estimate_be:
-        TIME_ESTIMATE.labels("backend",user).inc(time_estimate_be[user])
-    for user in time_spent_be:
-        TIME_SPENT.labels("backend",user).inc(time_spent_be[user])
-    for user in tickets_by_user_be:
-        TICKETS_USER.labels("backend",user).inc(tickets_by_user_be[user])
-        ITERATION_LABEL_STATUS.labels(user).inc(tickets_by_user_fe[user])
-    
-    ITERATION_ISSUE_COUNT.labels(iteration,"frontend").inc(issue_count_fe)
-    ITERATION_ISSUE_COUNT.labels(iteration,"backend").inc(issue_count_be)
-    
-    (iteration_weight, label_weights,timeestimate,timespent,timesestimate_tally,timespent_tally) = run_retro2("coredev","current","summary","all")
-    ITERATION_WEIGHT.labels(iteration).inc(iteration_weight)
-    ITERATION_TIME_ESTIMATE.labels(iteration).set(timeestimate)
-    ITERATION_TIME_SPENT.labels(iteration).set(timespent)
 
+ISSUE_WEIGHT = Gauge("gitlabkpis_Users_by_weight","Issue Weight by User",["iteration","team","user"])
+ISSUE_STATUS = Gauge("gitlabkpis_Issues_by_status","Issue Counts by Status",["iteration","team","status"])
+TIME_ESTIMATE = Gauge("gitlabkpis_time_estimate","Time Estimated by User",["iteration","team","user"])
+TIME_SPENT = Gauge("gitlabkpis_time_spent","Time Spent by User",["iteration","team","user"])
+TICKETS_USER = Gauge("gitlabkpis_tickets_by_user","Ticket Count by User",["iteration","team","user"])
+TICKETS_CLOSED_USER = Gauge("gitlabkpis_tickets_closed_by_user","Ticket Closed by User",["iteration","team","user"])
+
+
+BACKLOG_ISSUE_COUNT = Gauge("gitlabkpis_summary_issue_backlog_count","Number of issues in the Backlog",["team"])
+ITERATION_ISSUE_COUNT = Gauge("gitlabkpis_summary_issue_count","Number of issues in the iteration",["iteration","team"])
+ITERATION_WEIGHT = Gauge("gitlabkpis_summary_weight","Iteration issues weight",["iteration"])
+ITERATION_LABEL_WEIGHT = Gauge("gitlabkpis_summary_label_weight","Iteration weight by label",["iteration","status"])
+ITERATION_TIME_ESTIMATE = Gauge("gitlabkpis_summary_time_estimate","Time Estimated during Iteration",["iteration"])
+ITERATION_TIME_SPENT = Gauge("gitlabkpis_summary_time_spent","Time Spent during iteration",["iteration"])
+ITERATION_TIME_ESTIMATE_LABEL = Gauge("gitlabkpis_summary_time_estimate_by_status","Time Estimated during Iteration by label",["iteration","status"])
+ITERATION_TIME_SPENT_LABEL = Gauge("gitlabkpis_summary_time_spent_by_status","Time Spent during iteration by label",["iteration","status"])
+ITERATION_LABEL_CLASSIFICATION = Gauge("gitlabkpis_summary_issuegs_classification","Iteration weight by label",["iteration","team","status"])
+ITERATION_COUNT_SEVERITY = Gauge("gitlabkpis_summary_count_severity","Ticket Count by Severity",["iteration","team","severity"])
+ITERATION_COUNT_PRIORITY = Gauge("gitlabkpis_summary_count_priority","Ticket Count by Priority",["iteration","team","priority"])
+ITERATION_MILESTONE_COUNT = Gauge("gitlabkpis_summary_count_milestone","Ticket Count by Milestone",["iteration","team","milestone"])
+ITERATION_EPIC_COUNT = Gauge("gitlabkpis_summary_count_epic","Ticket Count by Epic",["iteration","team","epic"])
+RELEASES_INFO = Gauge("gitlabkpis_summary_releases","Current Release and Release Counts",['current','date'])
+VULN_SEV_INFO = Gauge("gitlabkpis_summary_vuln_severity","Vulnerability Counts by Severity",['severity'])
+VULN_SCANNER_INFO = Gauge("gitlabkpis_summary_vuln_scanner","Vulnerability Counts by Scanner",['scanner'])
+VULN_DETAILS_INFO = Gauge("gitlabkpis_summary_vuln_details","Vulnerability Counts by Scanner and Severity",['scanner','severity'])
+BUILD_STATUS_SUMMARY = Gauge("gitlabkpis_summary_build_status","Summary of Build status across all projects",['status'])
+BUILD_STATUS_PROJECTS = Gauge("gitlabkpis_project_build_status","Build status broken down by project",['project','status'])
+
+
+
+def build_metrics(request):
+
+    ISSUE_WEIGHT.clear()
+    ISSUE_STATUS.clear()
+    TIME_ESTIMATE.clear()
+    TIME_SPENT.clear()
+    TICKETS_USER.clear()
+
+    ITERATION_ISSUE_COUNT.clear()
+    ITERATION_WEIGHT.clear()
+    ITERATION_LABEL_WEIGHT.clear()
+    ITERATION_TIME_ESTIMATE.clear()
+    ITERATION_TIME_SPENT.clear()
+    ITERATION_TIME_ESTIMATE_LABEL.clear()
+    ITERATION_TIME_SPENT_LABEL.clear()
+    ITERATION_LABEL_CLASSIFICATION.clear()
+    ITERATION_COUNT_SEVERITY.clear()
+    ITERATION_COUNT_PRIORITY.clear()
+    ITERATION_MILESTONE_COUNT.clear()
+    ITERATION_EPIC_COUNT.clear()
+    TICKETS_CLOSED_USER.clear()
+    RELEASES_INFO.clear()
+    BACKLOG_ISSUE_COUNT.clear()
+    VULN_SEV_INFO.clear()
+    VULN_SCANNER_INFO.clear()
+    VULN_DETAILS_INFO.clear()
+    BUILD_STATUS_SUMMARY.clear()
+    BUILD_STATUS_PROJECTS.clear()
+
+    logger.info("Getting Group Issues")
+    (gl_issues,retroName) = get_group_issues(CONFIG_MAP)
+    
+    logger.info("Pulling Iteration Summary Status")
+    (issue_summary_status,priority_tally,severity_tally) = iteration_summarize_status(gl_issues)
+    for status in issue_summary_status:
+        # print("Label: {} - {}".format(status,issue_summary_status[status]))
+        ISSUE_STATUS.labels(retroName,"coredev",status).set(issue_summary_status[status])
+    
+    for priority in priority_tally:
+        ITERATION_COUNT_PRIORITY.labels(retroName,"coredev",priority).set(priority_tally[priority])
+    for severity in severity_tally:
+        ITERATION_COUNT_PRIORITY.labels(retroName,"coredev",severity).set(severity_tally[severity])
+
+    # Issue count in Iteration
+    ITERATION_ISSUE_COUNT.labels(retroName,"total").set(len(gl_issues))
+    logger.info("Getting Issue Counts metric")
+    (total_issues_frontend, total_issues_backend, total_issues_salesforce) = get_issue_counts(CONFIG_MAP,gl_issues)
+    ITERATION_ISSUE_COUNT.labels(retroName,"frontend").set(total_issues_frontend['iteration'])
+    ITERATION_ISSUE_COUNT.labels(retroName,"backend").set(total_issues_backend['iteration'])
+    ITERATION_ISSUE_COUNT.labels(retroName,"salesforce").set(total_issues_salesforce['iteration'])
+    BACKLOG_ISSUE_COUNT.labels("frontend").set(total_issues_frontend['backlog'])
+    BACKLOG_ISSUE_COUNT.labels("backend").set(total_issues_backend['backlog'])
+    BACKLOG_ISSUE_COUNT.labels("salesforce").set(total_issues_salesforce['backlog'])
+
+    logger.info("Fetching Iteration based Metrics")
+    (iteration_weight, label_weights,timeestimate,timespent,timesestimate_tally,timespent_tally,epic_tally_all,milestone_tally_all) = iteration_based_metrics(gl_issues)
+    #Overall weight of the iteration
+    ITERATION_WEIGHT.labels(retroName).set(iteration_weight)
+
+    #Overall Time estimated in the iteration
+    ITERATION_TIME_ESTIMATE.labels(retroName).set(timeestimate)
+
+    #Overall time spend in the iteration
+    ITERATION_TIME_SPENT.labels(retroName).set(timespent)
+
+    # Time estimate by label 
     for status in timesestimate_tally:
-        ITERATION_TIME_ESTIMATE_LABEL.labels(status).set(timesestimate_tally[status])
-    for status in timespent_tally:
-        ITERATION_TIME_ESTIMATE_LABEL.labels(status).set(timespent_tally[status])
-    for label in label_weights:
-        ITERATION_LABEL_WEIGHT.labels(iteration,label).set(label_weights[label])
+        ITERATION_TIME_ESTIMATE_LABEL.labels(retroName, status).set(timesestimate_tally[status])
     
+    #Time spent by label
+    for status in timespent_tally:
+        ITERATION_TIME_SPENT_LABEL.labels(retroName,status).set(timespent_tally[status])
 
-build_metrics()
+    # Weight for a given label
+    for label in label_weights:
+        ITERATION_LABEL_WEIGHT.labels(retroName,label).set(label_weights[label])
+    
+    # Epic counts for Iteration
+    for epic in epic_tally_all:
+        ITERATION_EPIC_COUNT.labels(retroName,"coredev",epic).set(epic_tally_all[epic])
+    # Milestone counts for Iteration
+    for milestone in milestone_tally_all:
+        ITERATION_MILESTONE_COUNT.labels(retroName,"coredev",milestone).set(milestone_tally_all[milestone])
+    
+    # Release Information
+    if CONFIG_MAP['release_status'] == 1:
+        logger.info("Getting Release Information")
+        releases = get_releases(CONFIG_MAP)
+        RELEASES_INFO.labels(releases['current'],releases['current_date']).set(releases['total'])
+
+    # Vuln Data
+    if CONFIG_MAP['vuln_status'] == 1 or CONFIG_MAP['pipeline_status']:
+        logger.info("Getting Vuln Information")
+        # (vuln_sev,vuln_scanner,vuln_details,pipe_project,pipeline_status) = titan_wide(CONFIG_MAP)
+        titan_wide_status = titan_wide(CONFIG_MAP)
+        for sev in titan_wide_status['vuln_sev']:
+            VULN_SEV_INFO.labels(sev).set(titan_wide_status['vuln_sev'][sev])
+        for scanner in titan_wide_status['vuln_scanner']:
+            VULN_SCANNER_INFO.labels(scanner).set(titan_wide_status['vuln_scanner'][scanner])
+        for scanner in titan_wide_status['vuln_details']:
+            for sev in titan_wide_status['vuln_details'][scanner]:
+                VULN_DETAILS_INFO.labels(scanner,sev).set(titan_wide_status['vuln_details'][scanner][sev])
+
+    # Build Status
+    if CONFIG_MAP['pipeline_status'] == 1:
+        logger.info("Getting Build Status")
+        for status in titan_wide_status['pipeline_status']:
+            BUILD_STATUS_SUMMARY.labels(status).set(titan_wide_status['pipeline_status'][status])
+        # for project in titan_wide_status['pipeline_project']:
+        #     for status in titan_wide_status['pipeline_project'][project]:
+        #         print(status)
+        #         BUILD_STATUS_PROJECTS.labels(project,status).set(titan_wide_status['pipeline_status'][project][status])
+    
+    TEAMS = CONFIG_MAP['teams']
+    # Team based
+    for team in TEAMS:
+        logger.info("Fetching info for {}".format(team))
+        (issue_weights_fe,time_spent_fe,time_estimate_fe,tickets_by_user_fe,issue_status_fe,label_class_fe,priority_fe,severity_fe,milestone_tally,epic_tally,user_closed_tally) = run_retro2(team,gl_issues,CONFIG_MAP)
+        
+        for status in tickets_by_user_fe:
+            TICKETS_USER.labels(retroName,team,status).set(tickets_by_user_fe[status])
+            
+        for x in issue_status_fe:
+            ISSUE_STATUS.labels(retroName,team,x).set(issue_status_fe[x])
+        for y in issue_weights_fe:
+            ISSUE_WEIGHT.labels(retroName,team,y).set(issue_weights_fe[y])
+        for z in time_estimate_fe:
+            TIME_ESTIMATE.labels(retroName,team,z).set(time_estimate_fe[z])
+        for user in time_spent_fe:
+            TIME_SPENT.labels(retroName,team,user).set(time_spent_fe[user])
+        for status in label_class_fe:
+            ITERATION_LABEL_CLASSIFICATION.labels(retroName,team,status).set(label_class_fe[status])
+        for priority in priority_fe:
+            ITERATION_COUNT_PRIORITY.labels(retroName,team,priority).set(priority_fe[priority])
+        for severity in severity_fe:
+            ITERATION_COUNT_PRIORITY.labels(retroName,team,severity).set(severity_fe[severity])
+        for milestone in milestone_tally:
+            ITERATION_MILESTONE_COUNT.labels(retroName,team,milestone).set(milestone_tally[milestone])
+        for epic in epic_tally:
+            ITERATION_EPIC_COUNT.labels(retroName,team,epic).set(epic_tally[epic])
+        # for user in user_closed_tally:
+        #     TICKETS_CLOSED_USER.labels(retroName,team,user).set(user_closed_tally[user])
+
+    return handle_metrics(request)
+    
+app.add_route("/metrics", build_metrics)
