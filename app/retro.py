@@ -1,3 +1,5 @@
+
+from fastapi import responses
 import requests
 import datetime
 import re
@@ -6,68 +8,78 @@ import os
 import logging
 
 logFormatter = '%(asctime)s - %(levelname)s - %(message)s'
-logging.basicConfig(format=logFormatter, level=logging.DEBUG)
+logging.basicConfig(format=logFormatter, level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-GITLAB_URL = 'https://gitlab.com/api/v4/'
-GITLAB_TOKEN = os.environ.get("GL_ACCESS_TOKEN")
-GITLAB_PROJECT_ID = ""
-
-# Gitlab headers to pass when making API call
-GITLAB_HEADERS = {
-    'PRIVATE-TOKEN': GITLAB_TOKEN
-}
-
-# set this to false if JIRA / Gitlab is using self-signed certificate.
-VERIFY_SSL_CERTIFICATE = True
-
-PROJECT_MAP = {
-    'iteratons': xxxxxx,  ## Where do the iterations live
-    'config': xxxxxxx     ## Where is the config.json file
-}
-
-#This maps team calls to labels.  To expand to more teams, add more entries.
-# The left key is what is called in slack and the value is the label to filter by
-
-# fileURL = GITLAB_URL + "api/v4/projects/{}/repository/files/retro.json/raw?ref=master".format(PROJECT_MAP['config'])
-LABEL_MAP = requests.get(
-    GITLAB_URL + "projects/{}/repository/files/warpigs.json/raw?ref=master".format(PROJECT_MAP['config']),
-    headers=GITLAB_HEADERS,
-    verify=VERIFY_SSL_CERTIFICATE
-).json()
-
-gl_iterations = []
-
-def get_all_iterations(p_id):
+def get_all_iterations(CONFIG_MAP,retroName="Current"):
+    gl_iterations = []
     gl_iterations = requests.get(
-        GITLAB_URL + "groups/{}/{}".format(p_id,"iterations"),
-        headers=GITLAB_HEADERS,
-        verify=VERIFY_SSL_CERTIFICATE
+        CONFIG_MAP['GITLAB_URL'] + "groups/{}/{}".format(CONFIG_MAP['iteration_group'],"iterations"),
+        headers=CONFIG_MAP['GITLAB_HEADERS'],
+        verify=True
     ).json()
-    return gl_iterations
 
-def get_issues(current_iteration_title,page):
-    response = requests.get(
-        GITLAB_URL + "groups/{}/issues?iteration_title={}&per_page=100&page={}".format(PROJECT_MAP['iterations'],current_iteration_title,page),
-        headers=GITLAB_HEADERS,
-            verify=VERIFY_SSL_CERTIFICATE
-    )
-    return response
+    current_iteration = ""
+    previous_iteration = ""
+    for iteration in gl_iterations:
+        iteration_start = datetime.datetime.strptime(iteration['start_date'],"%Y-%m-%d").date()
+        iteration_end = datetime.datetime.strptime(iteration['due_date'],"%Y-%m-%d").date()
+        if iteration_start <= datetime.date.today() <= iteration_end:
+            current_iteration = iteration['title']
+            # print("current iteration title: {}".format(iteration['title']))
+        elif iteration_start >= datetime.date.today():
+            future_iteration = iteration['title']
+        else:
+            previous_iteration = iteration['title']
 
-def summarize_status(issues):
+    return current_iteration
+
+
+def iteration_summarize_status(issues):
     label_tally = Counter()
+    priority_tally = Counter()
+    severity_tally = Counter()
+   
     for issue in issues:
         for label in issue['labels']:
             if re.search('Dev GS::',label):
                 label_tally[label] += 1
-    return label_tally
+            elif re.search('Priority GS::',label):
+                priority_tally[label] += 1
+            elif re.search('Severity GS::',label):
+                severity_tally[label] += 1
+    return (label_tally,priority_tally,severity_tally)
 
-def weight_by_assignee(issues):
-    w_tally = Counter()
+def get_participants(CONFIG_MAP,iid,in_tally):
+    p_tally = Counter()
+    gl_participants = requests.get(
+        iid + '/participants',
+        headers=CONFIG_MAP['GITLAB_HEADERS'],
+        verify=True
+    ).json()
+
+    if gl_participants:
+        for user in gl_participants:
+            in_tally[user['name']] += 1
+    return in_tally
+    
+
+
+def team_based_metrics(issues):
+    weight_tally = Counter()
     timespent_tally = Counter()
     timesestimate_tally = Counter()
-    count_tally = Counter()
+    user_tally = Counter()
+    status_tally = Counter()
+    category_tally = Counter()
+    priority_tally = Counter()
+    severity_tally = Counter()
+    epic_tally = Counter()
+    milestone_tally = Counter()
+    participant_tally = Counter()
+
+    count = 1
     for issue in issues:
         for users in issue['assignees']:
             user = users['name']
@@ -85,16 +97,36 @@ def weight_by_assignee(issues):
             else:
                 timeestimate = issue['time_stats']['time_estimate']//3600
 
-            w_tally[user] += weight
+            weight_tally[user] += weight
             timespent_tally[user] += timespent
             timesestimate_tally[user] += timeestimate
-            count_tally[user] += 1
+            user_tally[user] += 1
+        for label in issue['labels']:
+            if re.search('Dev GS::',label):
+                status_tally[label] += 1
+                if label == "Dev GS::Done":
+                    # participant_tally = get_participants(CONFIG_MAP,issue['_links']['self'],participant_tally)
+                    participant_tally = ""
+            elif re.search('Issue GS::',label):
+                category_tally[label] += 1
+            elif re.search('Priority GS::',label):
+                priority_tally[label] += 1
+            elif re.search('Severity GS::',label):
+                severity_tally[label] += 1
+        if issue['milestone']:
+            if issue['milestone']['title'] == "":
+                milestone_tally["No Milestone"] += 1
+            else:
+                milestone_tally[issue['milestone']['title']] += 1
+        if issue['epic']:
+            if issue['epic']['title'] == "":
+                epic_tally["No Epic"] += 1
+            else:
+                epic_tally[issue['epic']['title']] += 1
 
-    for tally in w_tally:
-        # logger.info("{} : {}..spent {}.. estimated {}".format(tally, w_tally[tally],timespent_tally[tally],timesestimate_tally[tally]))
-        return (w_tally,timespent_tally,timesestimate_tally,count_tally)
+    return (weight_tally,timespent_tally,timesestimate_tally,user_tally,status_tally,category_tally,priority_tally,severity_tally,milestone_tally,epic_tally,participant_tally)
 
-def weight_by_team(issues):
+def iteration_based_metrics(issues):
     overall_weight = 0
     w_tally = Counter()
     label_tally = Counter()
@@ -102,6 +134,8 @@ def weight_by_team(issues):
     timesestimate_tally = Counter()
     overall_timespent = 0
     overall_timeestimate = 0
+    epic_tally = Counter()
+    milestone_tally = Counter()
     
     for issue in issues:
         if issue['weight'] is None:
@@ -119,6 +153,7 @@ def weight_by_team(issues):
             timeestimate = 0
         else:
             timeestimate = issue['time_stats']['time_estimate']//3600
+
         overall_timespent += timespent
         overall_timeestimate += timeestimate
         #get a weight by label breakdown
@@ -127,176 +162,175 @@ def weight_by_team(issues):
                 label_tally[label] += weight
                 timesestimate_tally[label] += timeestimate
                 timespent_tally[label] += timespent
+        if issue['milestone']:
+            if issue['milestone']['title'] == "":
+                milestone_tally["No Milestone"] += 1
+            else:
+                milestone_tally[issue['milestone']['title']] += 1
+        if issue['epic']:
+            if issue['epic']['title'] == "":
+                epic_tally["No Epic"] += 1
+            else:
+                epic_tally[issue['epic']['title']] += 1
         
-    return (overall_weight, label_tally,overall_timeestimate,overall_timespent,timesestimate_tally,timespent_tally)
-
-def report(label_counts,weight,timespent,timeestimate,team,l_issues,l_count):
-    now = datetime.datetime.now()
-    message = {
-        "team": team,
-        "issue_count": len(l_issues),
-        "date_run": str(now),   
-    }
+    return (overall_weight, label_tally,overall_timeestimate,overall_timespent,timesestimate_tally,timespent_tally,epic_tally,milestone_tally)
+        
     
-    message['issues_by_status'] = [label_counts]
-    message['issues_by_weight'] = [weight]
-    message['timespent'] = [timespent]
-    message['timestimate'] = [timeestimate]
-    message['tickets_by_user'] = [l_count]
+def get_issues(CONFIG_MAP2,includes_labels,page=1,iteration="Current",exclude_labels=False,issue_state="all"):
+    """Find all the correct issues.  Handles pagination and includes/excludes
 
-    return message
+    Args:
+        project_id (int): Where should we look for issues?
+        includes_labels (str): Labels to search for
+        page (int, optional): Page to start search from. Defaults to 1.
+        iteration(str): Name of the iteration
+        exclude_labels (str, optional): labels to filter out. Defaults to False.
+        issue_state (str, optional): Look for opened or closed issues?. Defaults to "opened".
 
-def report_summary(overall_weight, label_tally,issue_count,label_counts,team,timeestimate,timespent,timesestimate_tally,timespent_tally):
-    now = datetime.datetime.now()
-    message = {
-        "team": team,
-        "issue_count": issue_count,
-        "overall_weight": overall_weight,
-        "time_spent": timespent,
-        "time_estimate": timeestimate,
-        "date_run": str(now),   
-    }
-   
-    message['issues_by_status'] = label_counts
-    message['issues_by_weight'] = label_tally
-    message['timespent'] = timesestimate_tally
-   
-    return message
+    Returns:
+        [type]: [description]
+    """
 
-
-async def run_retro(team,retroName,retrotype,metric):
-    today = datetime.date.today()
-    logger.info(today)
-
-    iterations = get_all_iterations(10477027)
-    current_iteration = ""
-    previous_iteration = ""
-    for iteration in iterations:
-        iteration_start = datetime.datetime.strptime(iteration['start_date'],"%Y-%m-%d").date()
-        iteration_end = datetime.datetime.strptime(iteration['due_date'],"%Y-%m-%d").date()
-        if iteration_start <= datetime.date.today() <= iteration_end:
-            current_iteration = iteration['title']
-        elif iteration_start >= datetime.date.today():
-            future_iteration = iteration['title']
-        else:
-            previous_iteration = iteration['title']
-    logger.info(f"previous title: {previous_iteration}")
-    logger.info(f"iternation selected: {retroName}")
-    if retroName == "current":
-        getRetro = current_iteration
-    elif retroName == "previous":
-        getRetro = previous_iteration
+    gl_params = "groups/{}/issues?labels={}&per_page=100&page={}".format(CONFIG_MAP2['parent_group'],includes_labels,page,issue_state)
+    
+    if iteration == "backlog":
+        issue_state = "opened"
     else:
-        getRetro = current_iteration
+        gl_params = gl_params + "&iteration_title={}".format(iteration)
     
+    if issue_state:
+        gl_params = gl_params + "&state={}".format(issue_state)
+    
+    if exclude_labels:
+        gl_params = gl_params + '&not[labels]={}'.format(exclude_labels)
+        
+    response = requests.get(
+        CONFIG_MAP2['GITLAB_URL'] + gl_params,
+        headers=CONFIG_MAP2['GITLAB_HEADERS'],
+        verify=True
+    )
+    logger.debug("issues returned: {}".format(len(response.json())))
+    return response
+
+
+def locate_issues(lCONFIG_MAP,filter_labels,iteration):
+    #query issues for a project and then filter down by labels supplied
     gl_issues = []
-    response = get_issues(getRetro,1)
-    
+
+    response = get_issues(lCONFIG_MAP.copy(),filter_labels,1,iteration)
     gl_issues.extend(response.json())
 
     try:
-        response.headers['X-Next-Page']
-        page = int(response.headers['X-Next-Page'])
+        response.headers['X-Page']
+        page = int(response.headers['X-Page'])
+        logger.info("try page: {}".format(page))
     except:
         page = int(response.headers['X-Total-Pages'])
-        
+        logger.info("except page: {}".format(page))
+       
     totalpage = int(response.headers['X-Total-Pages'])
+
+    logger.info("page: {}".format(page))  
+    logger.info("totalpage: {}".format(totalpage)) 
     
     while page != totalpage:
-        logger.info("Inside while loop")
-        response = get_issues(getRetro,page)
-        gl_issues.extend(response.json())
         page += 1
+        response = get_issues(lCONFIG_MAP.copy(),filter_labels,page,iteration)
+        gl_issues.extend(response.json())
     
-    gathered_issues = []
-    for lissue in gl_issues:
-        #need to filter down by label
-        if LABEL_MAP['retro'][team] in lissue['labels']:
-            # logger.info("Lables: {}".format(lissue['labels']))
-            gathered_issues.append(lissue)
+    return(gl_issues)
 
-    g_label_counts = summarize_status(gathered_issues)
-    if retrotype == "summary":
-        #run KPI style reports.. no names of the innocent
-        (iteration_weight, label_weights,timeestimate,timespent,timesestimate_tally,timespent_tally) = weight_by_team(gathered_issues)
-        message = report_summary(iteration_weight,label_weights,len(gathered_issues),g_label_counts,team,timeestimate,timespent,timesestimate_tally,timespent_tally)
-        return message
-    else:
-        (g_weight,g_timespent,g_timeestimate,g_count_talley) = weight_by_assignee(gathered_issues)
-        if metric == "all":
-            g_message = report(g_label_counts,g_weight,g_timespent,g_timeestimate,team,gathered_issues,g_count_talley)
-        elif metric == "issues_by_status":
-            print("blah blah")
-            g_message = g_label_counts
-        elif metric == "issues_by_weight":
-            g_message = g_weight
-        elif metric == "time_estimate":
-            g_message = g_timeestimate
-        elif metric == "time_spent":
-            g_message = g_timespent
-        elif metric == "tickets_by_user":
-            g_message = g_count_talley
-        return g_message
 
-def run_retro2(team,retroName,retrotype,metric):
+def get_group_issues(lCONFIG_MAP):
+
+    getRetro = get_all_iterations(lCONFIG_MAP)
+
+    gl_issues = locate_issues(lCONFIG_MAP,"Core GS",getRetro)
+
+    return (gl_issues, getRetro)
+
+def get_issue_counts(CONFIG_MAP,gl_issues):
+    fe = {
+        "iteration": 0,
+        "backlog": 0
+    }
+    be = {
+        "iteration": 0,
+        "backlog": 0
+    }
+    sfdc = {
+        "iteration": 0,
+        "backlog": 0
+    }
+    for issue in gl_issues:
+        for label in issue['labels']:
+            if re.search("Backend GS",label):
+                be['iteration'] += 1
+            elif re.search("Frontend GS",label):
+                fe['iteration'] += 1
+            elif re.search("Salesforce GS",label):
+                sfdc['iteration'] += 1
+    # Now look at backlog
+    bl_all_issues = locate_issues(CONFIG_MAP,"Core GS","backlog")
+    bl_issues = []
+    for issue in bl_all_issues:
+        for label in issue['labels']:
+            if label == CONFIG_MAP['backlog_label']:
+                bl_issues.append(issue)
+    for issue in bl_issues:
+        for label in issue['labels']:
+            if re.search("Backend GS",label):
+                be['backlog'] += 1
+            elif re.search("Frontend GS",label):
+                fe['backlog'] += 1
+            elif re.search("Salesforce GS",label):
+                sfdc['backlog'] += 1
+
+    return(fe,be,sfdc)
+
+def run_retro2(team,gl_issues,CONFIG_MAP):
+    """[summary]
+
+    Args:
+        team (str): Name of the team to run report for
+        gl_issues (dict): List of issues to run through
+
+    Returns:
+        list: list of dicts that contain metric data
+    """
     today = datetime.date.today()
-    logger.info(today)
 
-    iterations = get_all_iterations(10477027)
-    current_iteration = ""
-    previous_iteration = ""
-    for iteration in iterations:
-        iteration_start = datetime.datetime.strptime(iteration['start_date'],"%Y-%m-%d").date()
-        iteration_end = datetime.datetime.strptime(iteration['due_date'],"%Y-%m-%d").date()
-        if iteration_start <= datetime.date.today() <= iteration_end:
-            current_iteration = iteration['title']
-        elif iteration_start >= datetime.date.today():
-            future_iteration = iteration['title']
-        else:
-            previous_iteration = iteration['title']
-    logger.info(f"previous title: {previous_iteration}")
-    logger.info(f"iternation selected: {retroName}")
-    if retroName == "current":
-        getRetro = current_iteration
-    elif retroName == "previous":
-        getRetro = previous_iteration
-    else:
-        getRetro = current_iteration
-    
-    gl_issues = []
-    response = get_issues(getRetro,1)
-    
-    gl_issues.extend(response.json())
-
-    try:
-        response.headers['X-Next-Page']
-        page = int(response.headers['X-Next-Page'])
-    except:
-        page = int(response.headers['X-Total-Pages'])
-        
-    totalpage = int(response.headers['X-Total-Pages'])
-    
-    while page != totalpage:
-        response = get_issues(getRetro,page)
-        gl_issues.extend(response.json())
-        page += 1
-    
+    ## All issues gathered
     gathered_issues = []
     for lissue in gl_issues:
-        #need to filter down by label
-        if LABEL_MAP['retro'][team] in lissue['labels']:
-            gathered_issues.append(lissue)
+        #need to filter down by label.  Need to have team and Core GS labels
+        if CONFIG_MAP[team] in lissue['labels']:
+            if CONFIG_MAP['coredev'] in lissue['labels']:
+                gathered_issues.append(lissue)
+    logger.info("Number of issues: {}".format(len(gathered_issues)))
 
-    g_label_counts = summarize_status(gathered_issues)
-    if retrotype == "summary":
-        #run KPI style reports.. no names of the innocent
-        (iteration_weight, label_weights,timeestimate,timespent,timesestimate_tally,timespent_tally) = weight_by_team(gathered_issues)
-        return (iteration_weight, label_weights,timeestimate,timespent,timesestimate_tally,timespent_tally)
-    else:
-        (g_weight,g_timespent,g_timeestimate,g_count_talley) = weight_by_assignee(gathered_issues)
-        (iteration_weight, label_weights,timeestimate,timespent,timesestimate_tally,timespent_tally) = weight_by_team(gathered_issues)
-        if metric == "all":
-            g_message = report(g_label_counts,g_weight,g_timespent,g_timeestimate,team,gathered_issues,g_count_talley)
-            return g_message
-        elif metric == "metrics":
-            return (g_weight,g_timespent,g_timeestimate,g_count_talley,g_label_counts,len(gathered_issues),current_iteration)
+    return team_based_metrics(gathered_issues)
+
+
+def get_releases(CONFIG_MAP):
+    """Get the latest release name from the project
+
+    Args:
+        project_id (int): ID of the project to find releases in
+
+    Returns:
+        str: Version of the latest release  
+    """
+
+    releases = requests.get(
+        CONFIG_MAP['GITLAB_URL'] + "projects/{}/releases?&order_by=released_at&sort=desc".format(CONFIG_MAP['releases_project']),
+        headers=CONFIG_MAP['GITLAB_HEADERS'],
+        verify=True
+    ).json()
+    rels = {
+        "current": releases[0]['tag_name'],
+        "current_date": releases[0]['released_at'],
+        "total": len(releases)
+    }
+    
+    return rels
