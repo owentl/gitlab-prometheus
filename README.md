@@ -9,16 +9,18 @@ Generate prometheus metrics from gitlab issues
 I use a project that contains a JSON for the for the configuration variables of this project.  The script will pull the latest config for usage from GitLab.  This
 is done as there are others that use my script(s) where I work and this makes it easier for them to go in and set those vars instead of having to adjust the container/scripts.  If you want to avoid this process you can certainly bring the config into the file as well. 
 
-You will want to setup a config.json in a project and define that project ID in the retro.py file.
+You will want to make sure you have defined a few Envrionment Variables either in your .env or k8s config:
 
-- GITLAB_PROJECT_ID = This is the Gitlab project that houses the configuration
+- CONFIG_PROJECT_ID = This is the Gitlab project that houses the configuration
 
-- CONFIG_FILE = The name of the configuration.  If you would prefer to have this run locally, you can
+- CONFIG_FILENAME = The name of the configuration.  If you would prefer to have this run locally, you can
                 always copy the contents of config.json into the CONFIG_MAP variable and comment out
                 the CONFIG_MAP = requests.get( stanza.
 
-- BRANCH_NAME = This is the name of the branch that houses the config file.  Depending on when your
+- CONFIG_BRANCH = This is the name of the branch that houses the config file.  Depending on when your
                 project was created it might be main or master
+
+- GL_ACCESS_TOKEN = Your private token for accessing GitLab
 
 ## Running and testing locally
 This app is designed to be in a container and run via GitLab CI/CD.  So the CI/CD for this project builds and stores in the GitLab container repo.  
