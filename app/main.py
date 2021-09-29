@@ -1,12 +1,9 @@
 from logging import Logger
 import logging
 from fastapi import FastAPI
-# from typing import List
-# from gitlab.const import GUEST_ACCESS
 from retro import run_retro2, get_group_issues, iteration_summarize_status,get_issue_counts
 from retro import iteration_based_metrics,get_releases,run_team_issue_activity
 from titan import titan_wide
-# import gitlab
 import requests
 import os
 import json
@@ -166,7 +163,6 @@ def build_metrics(request):
     # Vuln Data
     if CONFIG_MAP['vuln_status'] == 1 or CONFIG_MAP['pipeline_status']:
         logger.info("Getting Vuln Information")
-        # (vuln_sev,vuln_scanner,vuln_details,pipe_project,pipeline_status) = titan_wide(CONFIG_MAP)
         titan_wide_status = titan_wide(CONFIG_MAP)
         for sev in titan_wide_status['vuln_sev']:
             VULN_SEV_INFO.labels(sev).set(titan_wide_status['vuln_sev'][sev])
