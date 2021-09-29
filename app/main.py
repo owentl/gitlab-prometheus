@@ -1,13 +1,17 @@
 from logging import Logger
 import logging
 from fastapi import FastAPI
-from retro import run_retro2, get_group_issues, iteration_summarize_status,get_issue_counts,iteration_based_metrics,get_releases
+# from typing import List
+# from gitlab.const import GUEST_ACCESS
+from retro import run_retro2, get_group_issues, iteration_summarize_status,get_issue_counts
+from retro import iteration_based_metrics,get_releases,run_team_issue_activity
 from titan import titan_wide
+# import gitlab
 import requests
 import os
 import json
 from starlette_exporter import PrometheusMiddleware, handle_metrics
-from prometheus_client import Gauge
+from prometheus_client import Gauge, Info
 
 logFormatter = '%(asctime)s - %(levelname)s - %(message)s'
 logging.basicConfig(format=logFormatter, level=logging.INFO)
@@ -20,30 +24,31 @@ app.add_middleware(PrometheusMiddleware)
 async def read_root():
     return {"Hello": "World"}
 
-
 ### Gitlab Setup
 project = {
     "GITLAB_URL":'https://gitlab.com/api/v4/',
-    "GITLAB_PROJECT_ID": "############",
+    "GITLAB_PROJECT_ID": "XXXX",
     "GITLAB_HEADERS": { 
             "PRIVATE-TOKEN": os.environ.get("GL_ACCESS_TOKEN") 
-    }
+    },
+    "CONFIG_FILE": "config.json",
+    "BRANCH_NAME": "main"
 }
+
 CONFIG_MAP = requests.get(
-    project['GITLAB_URL'] + "projects/{}/repository/files/config.json/raw?ref=master".format(project['GITLAB_PROJECT_ID']),
+    project['GITLAB_URL'] + "projects/{}/repository/files/{}/raw?ref={}".format(project['GITLAB_PROJECT_ID'],project['CONFIG_FILE'],project['BRANCH_NAME']),
     headers=project['GITLAB_HEADERS'],
     verify=True
-).json()['retro']
+).json()
 CONFIG_MAP.update(project)
-
-    
 
 ISSUE_WEIGHT = Gauge("gitlabkpis_Users_by_weight","Issue Weight by User",["iteration","team","user"])
 ISSUE_STATUS = Gauge("gitlabkpis_Issues_by_status","Issue Counts by Status",["iteration","team","status"])
 TIME_ESTIMATE = Gauge("gitlabkpis_time_estimate","Time Estimated by User",["iteration","team","user"])
 TIME_SPENT = Gauge("gitlabkpis_time_spent","Time Spent by User",["iteration","team","user"])
 TICKETS_USER = Gauge("gitlabkpis_tickets_by_user","Ticket Count by User",["iteration","team","user"])
-TICKETS_CLOSED_USER = Gauge("gitlabkpis_tickets_closed_by_user","Ticket Closed by User",["iteration","team","user"])
+TICKETS_CLOSED_USER = Gauge("gitlabkpis_tickets_closed_by_user","Ticket Closed by User (engineering complete)",["iteration","team","user"])
+TICKETS_COMPLETE_USER = Gauge("gitlabkpis_tickets_completed_by_user","Ticket Closed by User (Dev GS::Done)",["iteration","team","user"])
 
 
 BACKLOG_ISSUE_COUNT = Gauge("gitlabkpis_summary_issue_backlog_count","Number of issues in the Backlog",["team"])
@@ -59,7 +64,7 @@ ITERATION_COUNT_SEVERITY = Gauge("gitlabkpis_summary_count_severity","Ticket Cou
 ITERATION_COUNT_PRIORITY = Gauge("gitlabkpis_summary_count_priority","Ticket Count by Priority",["iteration","team","priority"])
 ITERATION_MILESTONE_COUNT = Gauge("gitlabkpis_summary_count_milestone","Ticket Count by Milestone",["iteration","team","milestone"])
 ITERATION_EPIC_COUNT = Gauge("gitlabkpis_summary_count_epic","Ticket Count by Epic",["iteration","team","epic"])
-RELEASES_INFO = Gauge("gitlabkpis_summary_releases","Current Release and Release Counts",['current','date'])
+RELEASES_INFO = Info("gitlabkpis_summary_releases","Current Release and Release Counts")
 VULN_SEV_INFO = Gauge("gitlabkpis_summary_vuln_severity","Vulnerability Counts by Severity",['severity'])
 VULN_SCANNER_INFO = Gauge("gitlabkpis_summary_vuln_scanner","Vulnerability Counts by Scanner",['scanner'])
 VULN_DETAILS_INFO = Gauge("gitlabkpis_summary_vuln_details","Vulnerability Counts by Scanner and Severity",['scanner','severity'])
@@ -89,6 +94,7 @@ def build_metrics(request):
     ITERATION_MILESTONE_COUNT.clear()
     ITERATION_EPIC_COUNT.clear()
     TICKETS_CLOSED_USER.clear()
+    TICKETS_COMPLETE_USER.clear()
     RELEASES_INFO.clear()
     BACKLOG_ISSUE_COUNT.clear()
     VULN_SEV_INFO.clear()
@@ -101,9 +107,8 @@ def build_metrics(request):
     (gl_issues,retroName) = get_group_issues(CONFIG_MAP)
     
     logger.info("Pulling Iteration Summary Status")
-    (issue_summary_status,priority_tally,severity_tally) = iteration_summarize_status(gl_issues)
+    (issue_summary_status,priority_tally,severity_tally) = iteration_summarize_status(gl_issues,CONFIG_MAP)
     for status in issue_summary_status:
-        # print("Label: {} - {}".format(status,issue_summary_status[status]))
         ISSUE_STATUS.labels(retroName,"coredev",status).set(issue_summary_status[status])
     
     for priority in priority_tally:
@@ -113,17 +118,16 @@ def build_metrics(request):
 
     # Issue count in Iteration
     ITERATION_ISSUE_COUNT.labels(retroName,"total").set(len(gl_issues))
+    
     logger.info("Getting Issue Counts metric")
-    (total_issues_frontend, total_issues_backend, total_issues_salesforce) = get_issue_counts(CONFIG_MAP,gl_issues)
-    ITERATION_ISSUE_COUNT.labels(retroName,"frontend").set(total_issues_frontend['iteration'])
-    ITERATION_ISSUE_COUNT.labels(retroName,"backend").set(total_issues_backend['iteration'])
-    ITERATION_ISSUE_COUNT.labels(retroName,"salesforce").set(total_issues_salesforce['iteration'])
-    BACKLOG_ISSUE_COUNT.labels("frontend").set(total_issues_frontend['backlog'])
-    BACKLOG_ISSUE_COUNT.labels("backend").set(total_issues_backend['backlog'])
-    BACKLOG_ISSUE_COUNT.labels("salesforce").set(total_issues_salesforce['backlog'])
+    (total_issues) = get_issue_counts(CONFIG_MAP,gl_issues)
+
+    for team in CONFIG_MAP['teams']:
+        ITERATION_ISSUE_COUNT.labels(retroName,team).set(total_issues[team]['iteration'])
+        BACKLOG_ISSUE_COUNT.labels(team).set(total_issues[team]['backlog'])
 
     logger.info("Fetching Iteration based Metrics")
-    (iteration_weight, label_weights,timeestimate,timespent,timesestimate_tally,timespent_tally,epic_tally_all,milestone_tally_all) = iteration_based_metrics(gl_issues)
+    (iteration_weight, label_weights,timeestimate,timespent,timesestimate_tally,timespent_tally,epic_tally_all,milestone_tally_all) = iteration_based_metrics(gl_issues,CONFIG_MAP)
     #Overall weight of the iteration
     ITERATION_WEIGHT.labels(retroName).set(iteration_weight)
 
@@ -156,7 +160,8 @@ def build_metrics(request):
     if CONFIG_MAP['release_status'] == 1:
         logger.info("Getting Release Information")
         releases = get_releases(CONFIG_MAP)
-        RELEASES_INFO.labels(releases['current'],releases['current_date']).set(releases['total'])
+        RELEASES_INFO.info({'version': releases['current'], 'release_date': releases['current_date'], 'short_date': releases['short_date']})
+
 
     # Vuln Data
     if CONFIG_MAP['vuln_status'] == 1 or CONFIG_MAP['pipeline_status']:
@@ -176,14 +181,9 @@ def build_metrics(request):
         logger.info("Getting Build Status")
         for status in titan_wide_status['pipeline_status']:
             BUILD_STATUS_SUMMARY.labels(status).set(titan_wide_status['pipeline_status'][status])
-        # for project in titan_wide_status['pipeline_project']:
-        #     for status in titan_wide_status['pipeline_project'][project]:
-        #         print(status)
-        #         BUILD_STATUS_PROJECTS.labels(project,status).set(titan_wide_status['pipeline_status'][project][status])
-    
-    TEAMS = CONFIG_MAP['teams']
+
     # Team based
-    for team in TEAMS:
+    for team in CONFIG_MAP['teams']:
         logger.info("Fetching info for {}".format(team))
         (issue_weights_fe,time_spent_fe,time_estimate_fe,tickets_by_user_fe,issue_status_fe,label_class_fe,priority_fe,severity_fe,milestone_tally,epic_tally,user_closed_tally) = run_retro2(team,gl_issues,CONFIG_MAP)
         
@@ -208,9 +208,13 @@ def build_metrics(request):
             ITERATION_MILESTONE_COUNT.labels(retroName,team,milestone).set(milestone_tally[milestone])
         for epic in epic_tally:
             ITERATION_EPIC_COUNT.labels(retroName,team,epic).set(epic_tally[epic])
-        # for user in user_closed_tally:
-        #     TICKETS_CLOSED_USER.labels(retroName,team,user).set(user_closed_tally[user])
-
+        if CONFIG_MAP['issue_activity'] == 1:
+            engDone = run_team_issue_activity(team,gl_issues,CONFIG_MAP)
+            for user in engDone:
+                TICKETS_CLOSED_USER.labels(retroName,team,user).set(engDone[user])
+        for user in user_closed_tally:
+            TICKETS_COMPLETE_USER.labels(retroName,team,user).set(user_closed_tally[user])
+    logger.info("Finished Metrics")
     return handle_metrics(request)
     
 app.add_route("/metrics", build_metrics)
