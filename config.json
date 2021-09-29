@@ -1,8 +1,22 @@
 {
-    "retro": {
-        "backend": "Backend",
-        "frontend": "Frontend",
-        "coredev": "Core Dev",
-        "coredev_summary": "Core Dev"
-    }
+    "backend": "Backend",
+    "frontend": "Frontend",
+    "team_label": "Core",
+    "coredev_summary": "Core",
+    "parent_group": "XXXXX",
+    "iteration_group": "YYYY",
+    "teams": ["frontend","backend"],
+    "releases_project": "ZZZZZ",
+    "backlog_label": "Dev GS::Backlog",
+    "pipeline_status": 1,
+    "vuln_status": 1,
+    "release_status": 1,
+    "issue_activity": 1,
+    "eng_done_status": "QA::Ready",
+    "done_status_label": "Dev::Done",
+    "qa_label_prefix": "QA::",
+    "dev_label_prefix": "Dev::",
+    "issue_status_prefix": "Issue::",
+    "priority_label_prefix": "Priority::",
+    "severity_label_prefix": "Severity::"
 }
